@@ -7,6 +7,9 @@ import { keccak256AsU8a } from '@polkadot/util-crypto';
 import { hexToU8a, stringToU8a, u8aToHex } from '@polkadot/util';
 import axios from 'axios';
 import config from './config.json';
+import { obtainOauthAccessToken, obtainOauthRequestToken } from './oauth1';
+import Client, { auth } from 'twitter-api-sdk';
+import Twitter from 'twitter';
 
 (async () => {
   const provider = new WsProvider(config.endpoint);
@@ -14,8 +17,15 @@ import config from './config.json';
   const keyring = new Keyring({ type: 'sr25519' });
   const keypair = keyring.addFromUri(config.advertiserMnemonic);
 
+  const oauth2Client = new auth.OAuth2User({
+    client_id: config.twitter.CLIENT_ID as string,
+    client_secret: config.twitter.CLIENT_SECRET as string,
+    callback: 'http://localhost:8080/twitter/oauth2/callback',
+    scopes: ["tweet.read", "users.read"],
+  });
+
   const app = express();
-  const port = 3002;
+  const port = 8080;
 
   app.use(cors());
 
@@ -25,6 +35,95 @@ import config from './config.json';
   app.get('/api', async (_, res) => {
     res.status(200).send('Hello Parami').end();
   });
+
+  app.get('/twitter/oauth1', async (req, res) => {
+    const obtainRequestTokenConfig = {
+      apiUrl: "https://api.twitter.com/oauth/request_token",
+      callbackUrl: 'http://localhost:8080/twitter/oauth1/callback',
+      consumerKey: config.twitter.TWITTER_CONSUMER_KEY,
+      consumerSecret: config.twitter.TWITTER_CONSUMER_SECRET,
+      method: "POST"
+    };
+    
+    const requestTokenData = await obtainOauthRequestToken(
+      obtainRequestTokenConfig
+    );
+
+    if (requestTokenData.oauth_callback_confirmed !== "true") {
+      res.status(503).json({ error: 'Twitter Oauth Request Token Error' }).end();
+      return;
+    }
+
+    res.redirect(`https://api.twitter.com/oauth/authorize?oauth_token=${requestTokenData.oauth_token}`);
+  });
+
+  app.get('/twitter/oauth1/callback', async (req, res) => {
+    // Get the oauth_verifier query parameter
+    const oauthVerifier = req.query.oauth_verifier as string;
+    // Get the oauth_token query parameter. 
+    // It's the same as the request token from step 1
+    const oauthToken = req.query.oauth_token as string;
+    console.log('Got oauth from twitter', oauthVerifier, oauthToken);
+
+    const accessTokenData = await obtainOauthAccessToken({
+      apiUrl: "https://api.twitter.com/oauth/access_token",
+      consumerKey: config.twitter.TWITTER_CONSUMER_KEY,
+      consumerSecret: config.twitter.TWITTER_CONSUMER_SECRET,
+      oauthToken,
+      oauthVerifier,
+      method: "POST"
+    });
+
+    // const response = await twitterSignIn.getAccessToken(requestToken, oauthTokenMap[requestToken], oauthVerifier);
+
+    console.log('Got user access token', accessTokenData);
+
+    const { oauth_token, oauth_token_secret } = accessTokenData;
+
+    const client = new Twitter({
+      consumer_key: config.twitter.TWITTER_CONSUMER_KEY,
+      consumer_secret: config.twitter.TWITTER_CONSUMER_SECRET,
+      access_token_key: oauth_token,
+      access_token_secret: oauth_token_secret
+    });
+
+    client.get('favorites/list', (error: any, tweets: any, response: any) => {
+      if (error) throw error;
+      console.log(tweets);  // The favorites.
+      console.log(response);  // Raw response object.
+    });
+    
+    res.sendStatus(200);
+  });
+
+  app.get('/twitter/oauth2', async function (req, res) {
+    const { state } = req.query;
+    const authUrl = oauth2Client.generateAuthURL({
+      state: 'testOauth',
+      code_challenge_method: "s256",
+    });
+
+    res.redirect(authUrl);
+  });
+
+  app.get('/twitter/oauth2/callback', async (req, res) => {
+    const { state, code } = req.query;
+    await oauth2Client.requestAccessToken(code as string);
+
+    const client = new Client(oauth2Client);
+
+    const myUser: {
+      data: {
+        id: string;
+        name: string;
+        username: string;
+      }
+    } = await client.users.findMyUser() as any;
+
+    console.log('oauth 2 got user', myUser);
+
+    res.sendStatus(200);
+  })
 
   app.post('/api/submitScore', async (req, res) => {
     let { ad, nftId, did, referrer, score, tag } = req.body;
